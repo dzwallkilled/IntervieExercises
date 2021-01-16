@@ -327,13 +327,6 @@ def build_network(network_choice, with_win_info, with_team_info):
         return TRANSFORMER(feature_dim)
 
 
-network_type = 'transformer'  # hyper-parameter
-network = build_network(network_type, with_win_info, with_team_info)
-device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-network = network.to(device)
-optimizer = optim.SGD(network.parameters(), lr=0.01, momentum=0.9, weight_decay=1e-4, nesterov=True)
-lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [10, 20, 25], gamma=0.1)
-
 
 def loss_function(output, target, target_dis=None):
     T = 1  # hyper-parameter
@@ -347,6 +340,13 @@ def loss_function(output, target, target_dis=None):
 
 
 def metric_function(output, target, topk=1):
+    """
+    The accuracy of model that the top $k$ predictions being the player who got 3 votes
+    :param output:
+    :param target:
+    :param topk:
+    :return:
+    """
     topks, topk_idxes = torch.topk(output, topk, dim=1)
     count = 0
     for p, t in zip(topk_idxes, target):
@@ -356,14 +356,32 @@ def metric_function(output, target, topk=1):
     return acc
 
 
-def train(epoch, model, optimizer, dataloader, disstill=False):
+def metric_function2(output, target_dist):
+    """
+    The accuracy of model that the prediction belongs to 1 of 3 players who got votes (1, 2, or 3)
+    :param output: output of model
+    :param target_dist: target distributions
+    :return:
+    """
+    topks, topk_idxes = torch.topk(target_dist, 3, dim=1)
+    _, p_topk_idxes = torch.topk(output, 1, dim=1)
+    count = 0
+    for p, t in zip(p_topk_idxes, topk_idxes):
+        if p in t:
+            count += 1
+    acc = count * 1.0 / target_dist.size(0)
+
+    return acc
+
+
+def train(epoch, model, optimizer, dataloader, distill=False):
     model.train()
 
     for idx, (data, target, target_dis) in enumerate(dataloader):
         optimizer.zero_grad()
         data, target, target_dis = data.float().to(device), target.to(device), target_dis.float().to(device)
         output = model(data)
-        if disstill:
+        if distill:
             loss = loss_function(output, target, target_dis)
         else:
             loss = loss_function(output, target)
@@ -380,26 +398,40 @@ def evaluate(epoch, model, dataloader, is_test=False):
     top1 = 0
     top3 = 0
     top5 = 0
-    for idx, (data, target, _) in enumerate(dataloader):
-        data, target = data.float().to(device), target.to(device)
+    acc3 = 0
+    for idx, (data, target, target_dist) in enumerate(dataloader):
+        data, target, target_dist = data.float().to(device), target.to(device), target_dist.to(device)
         output = model(data)
         top1 += metric_function(output, target, topk=1) * len(target)
         top3 += metric_function(output, target, topk=3) * len(target)
         top5 += metric_function(output, target, topk=5) * len(target)
+        acc3 += metric_function2(output, target_dist) * len(target)
         # if idx % 10 == 0:
         #     print(f'Eval {epoch} batch {idx}: Acc {accuracy}')
 
     num_samples = len(dataloader.dataset)
-    print(f'Test/Eval epoch {epoch} top1 is {top1/num_samples}, top3: {top3/num_samples}, top5: {top5/num_samples}')
+    print(f'Test/Eval epoch {epoch} top1 is {top1/num_samples}, top3: {top3/num_samples}, top5: {top5/num_samples} | Acc3: {acc3/num_samples}')
     return top1
 
 
-disstill = False  # hyper-parameter
+distill = False
+network_type = 'transformer'  # hyper-parameter
+lr = 0.01 #hyper-param
+momentum = 0.9 #hyper-param
+wd = 1e-4 #hyper-param
+lr_steps = [10, 20, 25] #hyper-param
+epochs = 30 #hyper-param
+network = build_network(network_type, with_win_info, with_team_info)
+device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+network = network.to(device)
+optimizer = optim.SGD(network.parameters(), lr=lr, momentum=momentum, weight_decay=wd, nesterov=True)
+lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, lr_steps, gamma=0.1)
+
 
 best_acc = 0
 for epoch in range(30):
     lr_scheduler.step(epoch)
-    train(epoch, network, optimizer, train_loader, disstill=disstill)
+    train(epoch, network, optimizer, train_loader, distill=distill)
     mean_acc = evaluate(epoch, network, val_loader)
     if (epoch + 1) % 5 == 0:
         torch.save(network.state_dict(), f'epoch{epoch}.pth')
